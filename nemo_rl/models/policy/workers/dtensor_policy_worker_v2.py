@@ -89,6 +89,7 @@ from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorke
 from nemo_rl.models.policy.workers.patches import apply_transformer_engine_patch
 from nemo_rl.utils.automodel_checkpoint import AutomodelCheckpointManager
 from nemo_rl.utils.checkpoint import CheckpointingConfig
+from nemo_rl.utils.native_checkpoint import convert_dcp_to_hf
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_producer
 
@@ -1917,6 +1918,31 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
             lora_enabled=self.lora_enabled,
             peft_config=self.peft_config,
         )
+
+        # Optionally save HF format checkpoint
+        if checkpointing_cfg and checkpointing_cfg.get("save_hf_checkpoint", False):
+            self._save_hf_checkpoint(weights_path, tokenizer_path)
+
+    def _save_hf_checkpoint(
+        self, weights_path: str, tokenizer_path: Optional[str]
+    ) -> None:
+        """Convert and save checkpoint in HuggingFace format."""
+        # Derive HF path: /results/step_N/policy/weights -> /results/step_N_hf
+        policy_dir = os.path.dirname(weights_path)
+        step_dir = os.path.dirname(policy_dir)
+        hf_ckpt_path = f"{step_dir}_hf"
+
+        # Only run conversion on rank 0 to avoid duplicate work
+        if torch.distributed.get_rank() == 0:
+            print(f"Saving HF checkpoint to {hf_ckpt_path}")
+            convert_dcp_to_hf(
+                dcp_ckpt_path=weights_path,
+                hf_ckpt_path=hf_ckpt_path,
+                model_name_or_path=self.model_name,
+                tokenizer_name_or_path=tokenizer_path or self.model_name,
+                overwrite=True,
+            )
+        torch.distributed.barrier()
 
     def load_checkpoint(
         self,
