@@ -49,6 +49,7 @@ class CheckpointingConfig(TypedDict):
     model_cache_dir (str): Directory for model cache (for safetensors format).
     model_repo_id (str): Repository ID for the model (for safetensors format).
     is_peft (bool): Whether the model uses PEFT.
+    save_hf_checkpoint (bool): Whether to automatically save a HuggingFace format checkpoint alongside the native format.
     """
 
     enabled: bool
@@ -65,6 +66,7 @@ class CheckpointingConfig(TypedDict):
     model_repo_id: NotRequired[str]  # Default: ""
     is_peft: NotRequired[bool]  # Default: False
     peft_config: NotRequired[Any]  # Default: None
+    save_hf_checkpoint: NotRequired[bool]  # Default: False - automatically save HF format
 
 
 class CheckpointManager:
