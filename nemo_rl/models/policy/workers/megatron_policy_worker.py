@@ -117,7 +117,10 @@ from nemo_rl.models.megatron.common import (
     forward_step_arbitrary_loss,
     get_moe_metrics,
 )
-from nemo_rl.models.megatron.community_import import import_model_from_hf_name
+from nemo_rl.models.megatron.community_import import (
+    export_model_from_megatron,
+    import_model_from_hf_name,
+)
 from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.interfaces import (
     ColocatablePolicyInterface,
@@ -130,6 +133,7 @@ from nemo_rl.models.policy.utils import (
 )
 from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
 from nemo_rl.models.policy.workers.patches import apply_transformer_engine_patch
+from nemo_rl.utils.checkpoint import CheckpointingConfig
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_producer
 
@@ -2317,6 +2321,7 @@ class MegatronPolicyWorker(AbstractPolicyWorker, ColocatablePolicyInterface):
         self,
         weights_path: str,
         optimizer_path: Optional[str] = None,
+        checkpointing_cfg: Optional[CheckpointingConfig] = None,
         **kwargs,
     ):
         """Save a training checkpoint.
@@ -2324,6 +2329,7 @@ class MegatronPolicyWorker(AbstractPolicyWorker, ColocatablePolicyInterface):
         Args:
             weights_path: The specific directory path where the checkpoint will be saved.
             optimizer_path: If not None, optimizer and scheduler states are saved if they exist.
+            checkpointing_cfg: Optional checkpointing configuration.
         """
         if not torch.distributed.is_initialized():
             raise RuntimeError(
@@ -2391,6 +2397,36 @@ class MegatronPolicyWorker(AbstractPolicyWorker, ColocatablePolicyInterface):
             raise
         finally:
             self.mcore_state.cfg.checkpoint.save = original_save_path
+
+        # Optionally save HF format checkpoint
+        if checkpointing_cfg and checkpointing_cfg.get("save_hf_checkpoint", False):
+            self._save_hf_checkpoint(weights_path)
+
+    def _save_hf_checkpoint(self, weights_path: str) -> None:
+        """Convert and save checkpoint in HuggingFace format."""
+        # Derive HF path: /results/step_N/policy/weights -> /results/step_N_hf
+        policy_dir = os.path.dirname(weights_path)
+        step_dir = os.path.dirname(policy_dir)
+        hf_ckpt_path = f"{step_dir}_hf"
+
+        # Find the iter_XXXXXXX directory inside weights_path
+        iter_dirs = [d for d in os.listdir(weights_path) if d.startswith("iter_")]
+        if not iter_dirs:
+            print(f"Warning: No iter_* directory found in {weights_path}, skipping HF save")
+            return
+        megatron_ckpt_path = os.path.join(weights_path, sorted(iter_dirs)[-1])
+
+        # Only run conversion on data parallel rank 0 to avoid duplicate work
+        if parallel_state.get_data_parallel_rank() == 0:
+            print(f"Saving HF checkpoint to {hf_ckpt_path}")
+            export_model_from_megatron(
+                hf_model_name=self.model_name,
+                input_path=megatron_ckpt_path,
+                output_path=hf_ckpt_path,
+                hf_tokenizer_path=self.tokenizer_name,
+                overwrite=True,
+            )
+        torch.distributed.barrier()
 
     def load_checkpoint(self, weights_path: str, optimizer_path: Optional[str] = None):
         """Load a training checkpoint.
